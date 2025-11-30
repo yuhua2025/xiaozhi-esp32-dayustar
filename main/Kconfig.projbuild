@@ -116,7 +116,7 @@ choice BOARD_TYPE
     prompt "Board Type"
     default BOARD_TYPE_BREAD_COMPACT_WIFI
     help
-        Board type. 开发板类型
+        Board type. 开发板类型      
     config BOARD_TYPE_BREAD_COMPACT_WIFI
         bool "Bread Compact WiFi (面包板)"
         depends on IDF_TARGET_ESP32S3
@@ -438,6 +438,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_AIPI_LITE
         bool "AIPI-Lite"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_DAYU_STAR_WIFI
+        bool "Dayu-star-wifi"
+        depends on IDF_TARGET_ESP32S3          
 endchoice
 
 choice
