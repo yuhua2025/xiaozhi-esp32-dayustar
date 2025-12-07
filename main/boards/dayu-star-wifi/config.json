@@ -1,0 +1,9 @@
+{
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "dayu-star-wifi",
+            "sdkconfig_append": []
+        }
+    ]
+}
