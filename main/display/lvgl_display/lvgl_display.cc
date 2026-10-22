@@ -135,6 +135,9 @@ LvglDisplay::~LvglDisplay() {
     if (battery_label_ != nullptr) {
         lv_obj_del(battery_label_);
     }
+    if (battery_percent_label_ != nullptr) {
+        lv_obj_del(battery_percent_label_);
+    }
     if (low_battery_popup_ != nullptr) {
         lv_obj_del(low_battery_popup_);
     }
@@ -259,9 +262,19 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             icon = levels[level_index];
         }
         DisplayLockGuard lock(this);
-        if (battery_label_ != nullptr && battery_icon_ != icon) {
+        if (battery_label_ != nullptr) {
             battery_icon_ = icon;
-            lv_label_set_text(battery_label_, battery_icon_);
+            lv_label_set_text(battery_label_, icon);
+        }
+        if (battery_percent_label_ == nullptr && battery_label_ != nullptr) {
+            battery_percent_label_ = lv_label_create(lv_obj_get_parent(battery_label_));
+            lv_obj_set_style_text_font(battery_percent_label_, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_margin_left(battery_percent_label_, -8, 0);
+        }
+        if (battery_percent_label_ != nullptr) {
+            char percent_buf[16];
+            snprintf(percent_buf, sizeof(percent_buf), "%d%%", battery_level);
+            lv_label_set_text(battery_percent_label_, percent_buf);
         }
 
         // Check low battery popup only when clock tick event is triggered
