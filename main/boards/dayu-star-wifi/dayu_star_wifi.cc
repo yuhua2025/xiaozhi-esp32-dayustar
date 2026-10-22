@@ -145,7 +145,6 @@ private:
 
         volume_up_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
-            ESP_LOGI(TAG, "VOL+ click");
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() + 10;
             if (volume > 100) {
@@ -153,28 +152,6 @@ private:
             }
             codec->SetOutputVolume(volume);
             GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
-        });
-        volume_up_button_.OnLongPress([this]() {
-            power_save_timer_->WakeUp();
-            ESP_LOGI(TAG, "VOL+ long press");
-            auto& player = SdWavPlayer::GetInstance();
-            auto codec = GetAudioCodec();
-            if (!player.IsMounted()) {
-                GetDisplay()->ShowNotification("SD not mounted");
-                return;
-            }
-            if (!player.PlayNext("/sdcard", codec)) {
-                ESP_LOGW(TAG, "No .mp3 found on SD");
-                GetDisplay()->ShowNotification("No MP3 file");
-                return;
-            }
-            std::string name = player.CurrentTitle();
-            if (name.empty()) {
-                name = "曲目";
-            }
-            std::string title = std::to_string(player.CurrentTrack()) + "/" +
-                                std::to_string(player.TrackCount()) + "  " + name;
-            GetDisplay()->SetChatMessage("assistant", title.c_str());
         });
 
         volume_down_button_.OnClick([this]() {
@@ -187,17 +164,121 @@ private:
             codec->SetOutputVolume(volume);
             GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
         });
-        volume_down_button_.OnLongPress([this]() {
-            power_save_timer_->WakeUp();
-            ESP_LOGI(TAG, "VOL- long press: stop playback");
-            SdWavPlayer::GetInstance().Stop();
-            GetDisplay()->SetChatMessage("assistant", "");
-            GetDisplay()->ShowNotification("Stopped");
-        });
     }
 
     void InitializeTools() {
         static LED_Lamp lamp_G(GPIO_NUM_47);
+
+        // SD card playback is controlled by the AI through MCP tools (no buttons).
+        auto& mcp_server = McpServer::GetInstance();
+        mcp_server.AddTool("self.sd_player.list",
+                           "List every MP3 song on the SD card, with its number and title.",
+                           PropertyList(),
+                           [](const PropertyList&) -> ReturnValue {
+                               auto& player = SdWavPlayer::GetInstance();
+                               if (!player.IsMounted()) {
+                                   return std::string("SD card is not mounted");
+                               }
+                               const auto& tracks = player.BuildPlaylist(TF_MOUNT_POINT);
+                               if (tracks.empty()) {
+                                   return std::string("No MP3 files found on the SD card");
+                               }
+                               std::string out;
+                               for (size_t i = 0; i < tracks.size(); i++) {
+                                   std::string title = player.TrackTitle(i);
+                                   if (title.empty()) {
+                                       title = "Unknown";
+                                   }
+                                   out += std::to_string(i + 1) + ". " + title + "\n";
+                               }
+                               return out;
+                           });
+
+        mcp_server.AddTool("self.sd_player.play",
+                           "Play a song from the SD card. 'track' can be the song number "
+                           "returned by self.sd_player.list, a part of the song title, or "
+                           "empty to play the next song.",
+                           PropertyList({Property("track", kPropertyTypeString, std::string())}),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               auto& player = SdWavPlayer::GetInstance();
+                               if (!player.IsMounted()) {
+                                   return std::string("SD card is not mounted");
+                               }
+                               auto codec = GetAudioCodec();
+                               std::string track = properties["track"].value<std::string>();
+                               while (!track.empty() && track.front() == ' ') {
+                                   track.erase(track.begin());
+                               }
+                               while (!track.empty() && track.back() == ' ') {
+                                   track.pop_back();
+                               }
+
+                               bool ok = false;
+                               const auto& tracks = player.BuildPlaylist(TF_MOUNT_POINT);
+                               if (track.empty()) {
+                                   ok = player.PlayNext(TF_MOUNT_POINT, codec);
+                               } else if (!track.empty() &&
+                                          track.find_first_not_of("0123456789") == std::string::npos) {
+                                   size_t index = (size_t)std::stoi(track);
+                                   ok = index > 0 && player.PlayIndex(index - 1, TF_MOUNT_POINT, codec);
+                               } else {
+                                   for (size_t i = 0; i < tracks.size() && !ok; i++) {
+                                       std::string title = player.TrackTitle(i);
+                                       if (!title.empty() && title.find(track) != std::string::npos) {
+                                           ok = player.PlayIndex(i, TF_MOUNT_POINT, codec);
+                                       }
+                                   }
+                               }
+                               if (!ok) {
+                                   return std::string("Song not found or cannot be played");
+                               }
+                               vTaskDelay(pdMS_TO_TICKS(150));  // let the task parse the title
+                               return std::string("Playing: ") + player.CurrentTitle();
+                           });
+
+        mcp_server.AddTool("self.sd_player.next", "Play the next song on the SD card.",
+                           PropertyList(),
+                           [this](const PropertyList&) -> ReturnValue {
+                               auto& player = SdWavPlayer::GetInstance();
+                               if (!player.IsMounted()) {
+                                   return std::string("SD card is not mounted");
+                               }
+                               if (!player.PlayNext(TF_MOUNT_POINT, GetAudioCodec())) {
+                                   return std::string("No song to play");
+                               }
+                               vTaskDelay(pdMS_TO_TICKS(150));
+                               return std::string("Playing: ") + player.CurrentTitle();
+                           });
+
+        mcp_server.AddTool("self.sd_player.stop", "Stop SD card playback.", PropertyList(),
+                           [](const PropertyList&) -> ReturnValue {
+                               SdWavPlayer::GetInstance().Stop();
+                               return true;
+                           });
+
+        mcp_server.AddTool("self.sd_player.status",
+                           "Get the current SD card playback status.", PropertyList(),
+                           [](const PropertyList&) -> ReturnValue {
+                               auto& player = SdWavPlayer::GetInstance();
+                               if (!player.IsPlaying()) {
+                                   return std::string("Not playing");
+                               }
+                               int elapsed = player.ElapsedSeconds();
+                               int duration = player.DurationSeconds();
+                               char buf[192];
+                               if (duration > 0) {
+                                   snprintf(buf, sizeof(buf), "Playing %d/%d %s: %d:%02d/%d:%02d",
+                                            player.CurrentTrack(), player.TrackCount(),
+                                            player.CurrentTitle().c_str(), elapsed / 60,
+                                            elapsed % 60, duration / 60, duration % 60);
+                               } else {
+                                   snprintf(buf, sizeof(buf), "Playing %d/%d %s: %d:%02d",
+                                            player.CurrentTrack(), player.TrackCount(),
+                                            player.CurrentTitle().c_str(), elapsed / 60,
+                                            elapsed % 60);
+                               }
+                               return std::string(buf);
+                           });
     }
 
 public:
@@ -216,6 +297,31 @@ public:
         InitializeTools();
         // Mount SD card
         SdWavPlayer::GetInstance().Mount();
+
+        // 1 Hz playback progress updater for the bottom bar
+        // (a dedicated task: the esp_timer task stack is too small for LVGL text)
+        xTaskCreate([](void* arg) {
+            auto* self = static_cast<dayu_star_wifi*>(arg);
+            auto& app = Application::GetInstance();
+            auto& player = SdWavPlayer::GetInstance();
+            int paused_seconds = 0;
+            while (true) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                // Music has been waiting for a conversation that is not going
+                // anywhere: end the idle listening session so playback resumes.
+                if (player.IsPaused() && app.GetDeviceState() == kDeviceStateListening &&
+                    !app.IsVoiceDetected()) {
+                    if (++paused_seconds >= 2) {
+                        paused_seconds = 0;
+                        ESP_LOGI(TAG, "Music waiting, leaving listening state");
+                        app.Schedule([]() { Application::GetInstance().SetDeviceState(kDeviceStateIdle); });
+                    }
+                } else {
+                    paused_seconds = 0;
+                }
+                self->UpdatePlaybackStatus();
+            }
+        }, "mp3_status", 4096, this, 2, nullptr);
     }
 
     virtual Led* GetLed() override {
@@ -267,6 +373,38 @@ public:
             power_save_timer_->WakeUp();
         }
         WifiBoard::SetPowerSaveLevel(level);
+    }
+
+    static std::string FormatMmss(int seconds) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d:%02d", seconds / 60, seconds % 60);
+        return buf;
+    }
+
+    // Two-line playback info: "1:23/4:45" then "1/8  title"
+    std::string BuildPlaybackText() {
+        auto& player = SdWavPlayer::GetInstance();
+        std::string name = player.CurrentTitle();
+        if (name.empty()) {
+            name = "曲目";
+        }
+        std::string text = FormatMmss(player.ElapsedSeconds());
+        int duration = player.DurationSeconds();
+        if (duration > 0) {
+            text += "/" + FormatMmss(duration);
+        }
+        text += "\n" + std::to_string(player.CurrentTrack()) + "/" +
+                std::to_string(player.TrackCount()) + "  " + name;
+        return text;
+    }
+
+    // Refresh the bottom bar while playing
+    void UpdatePlaybackStatus() {
+        auto& player = SdWavPlayer::GetInstance();
+        if (!player.IsPlaying()) {
+            return;
+        }
+        GetDisplay()->SetChatMessage("assistant", BuildPlaybackText().c_str());
     }
 };
 

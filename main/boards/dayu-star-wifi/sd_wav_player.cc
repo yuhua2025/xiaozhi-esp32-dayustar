@@ -341,15 +341,105 @@ std::string SdWavPlayer::ReadId3Title(const std::string& path) {
     return title;
 }
 
+// Estimate track length: exact via Xing/Info frame count (VBR), else from bitrate
+int SdWavPlayer::ProbeDuration(const std::string& path) {
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp) {
+        return 0;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return 0;
+    }
+    long file_size = ftell(fp);
+    if (file_size <= 0) {
+        fclose(fp);
+        return 0;
+    }
+    fseek(fp, 0, SEEK_SET);
+
+    long audio_start = 0;
+    uint8_t hdr[10];
+    if (fread(hdr, 1, 10, fp) == 10 && memcmp(hdr, "ID3", 3) == 0) {
+        long tag = ((long)(hdr[6] & 0x7F) << 21) | ((long)(hdr[7] & 0x7F) << 14) |
+                   ((long)(hdr[8] & 0x7F) << 7) | (long)(hdr[9] & 0x7F);
+        audio_start = 10 + tag;
+        if ((hdr[5] & 0x10) != 0) {
+            audio_start += 10;  // ID3v2.4 footer
+        }
+    }
+    if (audio_start >= file_size) {
+        fclose(fp);
+        return 0;
+    }
+    fseek(fp, audio_start, SEEK_SET);
+
+    static const int kBitrateM1[] = {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320};
+    static const int kBitrateM2[] = {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160};
+    static const int kSampleRate[4][3] = {
+        {11025, 12000, 8000},   // MPEG 2.5
+        {0, 0, 0},              // reserved
+        {22050, 24000, 16000},  // MPEG 2
+        {44100, 48000, 32000},  // MPEG 1
+    };
+
+    // Note: PlayAudio() runs in the button (esp_timer) task whose stack is ~3.5 KB,
+    // so all buffers here must live on the heap.
+    std::vector<uint8_t> buf(4096);
+    size_t n = fread(buf.data(), 1, buf.size(), fp);
+    for (size_t i = 0; i + 4 <= n; i++) {
+        int flen = Mp3FrameLength(buf.data() + i, n - i);
+        if (flen <= 0) {
+            continue;
+        }
+        unsigned h = ((unsigned)buf[i] << 24) | ((unsigned)buf[i + 1] << 16) |
+                     ((unsigned)buf[i + 2] << 8) | buf[i + 3];
+        int ver = (h >> 19) & 0x3;
+        int sr_idx = (h >> 10) & 0x3;
+        int br_idx = (h >> 12) & 0xF;
+        if (ver == 1 || sr_idx == 3 || br_idx == 0 || br_idx == 0xF) {
+            fclose(fp);
+            return 0;
+        }
+        int sr = kSampleRate[ver][sr_idx];
+        int kbps = (ver == 3) ? kBitrateM1[br_idx] : kBitrateM2[br_idx];
+        int spf = (ver == 3) ? 1152 : 576;
+
+        int frames = 0;
+        size_t limit = i + (size_t)flen;
+        if (limit > n) {
+            limit = n;
+        }
+        size_t scan_end = (i + 200 < limit) ? (i + 200) : limit;
+        for (size_t k = i + 4; k + 8 <= scan_end; k++) {
+            if (memcmp(buf.data() + k, "Xing", 4) == 0 || memcmp(buf.data() + k, "Info", 4) == 0) {
+                uint32_t flags = ((uint32_t)buf[k + 4] << 24) | ((uint32_t)buf[k + 5] << 16) |
+                                 ((uint32_t)buf[k + 6] << 8) | buf[k + 7];
+                if ((flags & 1) && k + 12 <= limit) {
+                    frames = (int)(((uint32_t)buf[k + 8] << 24) | ((uint32_t)buf[k + 9] << 16) |
+                                   ((uint32_t)buf[k + 10] << 8) | buf[k + 11]);
+                }
+                break;
+            }
+        }
+        fclose(fp);
+        if (frames > 0 && sr > 0) {
+            return (int)((int64_t)frames * spf / sr);
+        }
+        if (kbps > 0) {
+            return (int)((int64_t)(file_size - audio_start) * 8 / (kbps * 1000L));
+        }
+        return 0;
+    }
+    fclose(fp);
+    return 0;
+}
+
 bool SdWavPlayer::PlayNext(const std::string& dir, AudioCodec* codec) {
     if (!mounted_ || !codec) {
         return false;
     }
-    if (audio_files_.empty()) {
-        CollectAudio(dir, audio_files_);
-        std::sort(audio_files_.begin(), audio_files_.end());
-        ESP_LOGI(TAG, "Playlist built: %d track(s)", (int)audio_files_.size());
-    }
+    BuildPlaylist(dir);
     if (audio_files_.empty()) {
         return false;
     }
@@ -359,6 +449,39 @@ bool SdWavPlayer::PlayNext(const std::string& dir, AudioCodec* codec) {
     std::string path = audio_files_[audio_index_++];
     ESP_LOGI(TAG, "Track %d/%d: %s", (int)audio_index_, (int)audio_files_.size(), path.c_str());
     return PlayAudio(path, codec);
+}
+
+const std::vector<std::string>& SdWavPlayer::BuildPlaylist(const std::string& dir) {
+    if (audio_files_.empty()) {
+        CollectAudio(dir, audio_files_);
+        std::sort(audio_files_.begin(), audio_files_.end());
+        ESP_LOGI(TAG, "Playlist built: %d track(s)", (int)audio_files_.size());
+    }
+    return audio_files_;
+}
+
+bool SdWavPlayer::PlayIndex(size_t index, const std::string& dir, AudioCodec* codec) {
+    if (!mounted_ || !codec) {
+        return false;
+    }
+    BuildPlaylist(dir);
+    if (index >= audio_files_.size()) {
+        return false;
+    }
+    audio_index_ = index + 1;
+    ESP_LOGI(TAG, "Track %d/%d: %s", (int)audio_index_, (int)audio_files_.size(),
+             audio_files_[index].c_str());
+    return PlayAudio(audio_files_[index], codec);
+}
+
+std::string SdWavPlayer::TrackTitle(size_t index) {
+    if (index >= audio_files_.size()) {
+        return {};
+    }
+    if (audio_index_ == index + 1 && !current_title_.empty()) {
+        return current_title_;
+    }
+    return ReadId3Title(audio_files_[index]);
 }
 
 // ———————————————————— PlayAudio ————————————————————
@@ -384,8 +507,6 @@ bool SdWavPlayer::PlayAudio(const std::string& path, AudioCodec* codec) {
     }
 
     current_path_ = path;
-    current_title_ = ReadId3Title(path);
-    ESP_LOGI(TAG, "Title: %s", current_title_.empty() ? "(none)" : current_title_.c_str());
     current_codec_ = codec;
     want_stop_ = false;
     playing_ = true;
@@ -417,6 +538,14 @@ void SdWavPlayer::PlaybackTask() {
     const std::string path = current_path_;
     AudioCodec* codec = current_codec_;
     ESP_LOGI(TAG, "PlaybackTask start: %s", path.c_str());
+
+    // Parse tags here, not in the caller: PlayAudio() is invoked from the
+    // button (esp_timer) task whose stack is only ~3.5 KB.
+    current_title_ = ReadId3Title(path);
+    ESP_LOGI(TAG, "Title: %s", current_title_.empty() ? "(none)" : current_title_.c_str());
+    duration_sec_ = ProbeDuration(path);
+    elapsed_sec_ = 0;
+    ESP_LOGI(TAG, "Duration: %d s", duration_sec_);
 
     FILE* fp = fopen(path.c_str(), "rb");
     if (!fp) {
@@ -480,6 +609,7 @@ void SdWavPlayer::PlaybackTask() {
     esp_ae_rate_cvt_handle_t resampler = nullptr;
 
     int total_frames = 0;
+    uint64_t played_samples = 0;
 
     // Resample accumulated block and write it to I2S in one shot
     auto write_block = [&]() {
@@ -542,6 +672,17 @@ void SdWavPlayer::PlaybackTask() {
     };
 
     while (!want_stop_) {
+        // Pause whenever a conversation is in progress (listening/speaking/...):
+        // the microphone has no echo cancellation, so music must be silent while
+        // the assistant is awake. Decoding simply stops, so playback resumes from
+        // the same position.
+        if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+            paused_for_conversation_ = true;
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        paused_for_conversation_ = false;
+
         // 1. Make sure a header can be parsed
         while ((fill - pos) < 4 && !eof && !want_stop_) {
             if (!refill()) {
@@ -675,6 +816,12 @@ void SdWavPlayer::PlaybackTask() {
                 // 6. Write in large blocks to avoid I2S underrun
                 if (mono_acc.size() >= kMonoBlockSamples) {
                     write_block();
+                }
+
+                // Progress: source samples decoded so far
+                played_samples += mono_samples;
+                if (decoded_sr > 0) {
+                    elapsed_sec_ = (int)(played_samples / (uint64_t)decoded_sr);
                 }
             }
 
