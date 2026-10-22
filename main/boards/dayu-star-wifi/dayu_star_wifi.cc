@@ -24,7 +24,7 @@
 #define TAG "dayu_star_wifi"
 
 // 电源管理引脚（从 config.h 之外额外定义，避免与显示/音频宏冲突）
-#define CHARGING_DETECT_PIN GPIO_NUM_37
+#define CHARGING_DETECT_PIN GPIO_NUM_38
 #define POWER_HOLD_PIN      GPIO_NUM_21
 
 class dayu_star_wifi : public WifiBoard {

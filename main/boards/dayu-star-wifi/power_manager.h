@@ -135,7 +135,7 @@ public:
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle_));
         ESP_ERROR_CHECK(esp_timer_start_periodic(timer_handle_, 1000000));
 
-        // 初始化 ADC
+        // 初始化 ADC（GPIO 17 = ADC2_CH6，与 PSRAM 无冲突）
         adc_oneshot_unit_init_cfg_t init_config = {
             .unit_id = ADC_UNIT_2,
             .ulp_mode = ADC_ULP_MODE_DISABLE,
