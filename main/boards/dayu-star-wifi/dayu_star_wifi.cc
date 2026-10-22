@@ -10,6 +10,7 @@
 #include "lamp_G.h"
 #include "power_save_timer.h"
 #include "power_manager.h"
+#include "sd_wav_player.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -144,6 +145,7 @@ private:
 
         volume_up_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
+            ESP_LOGI(TAG, "VOL+ click");
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() + 10;
             if (volume > 100) {
@@ -154,8 +156,25 @@ private:
         });
         volume_up_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
-            GetAudioCodec()->SetOutputVolume(100);
-            GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME);
+            ESP_LOGI(TAG, "VOL+ long press");
+            auto& player = SdWavPlayer::GetInstance();
+            auto codec = GetAudioCodec();
+            if (!player.IsMounted()) {
+                GetDisplay()->ShowNotification("SD not mounted");
+                return;
+            }
+            if (!player.PlayNext("/sdcard", codec)) {
+                ESP_LOGW(TAG, "No .mp3 found on SD");
+                GetDisplay()->ShowNotification("No MP3 file");
+                return;
+            }
+            std::string name = player.CurrentTitle();
+            if (name.empty()) {
+                name = "曲目";
+            }
+            std::string title = std::to_string(player.CurrentTrack()) + "/" +
+                                std::to_string(player.TrackCount()) + "  " + name;
+            GetDisplay()->SetChatMessage("assistant", title.c_str());
         });
 
         volume_down_button_.OnClick([this]() {
@@ -170,8 +189,10 @@ private:
         });
         volume_down_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
-            GetAudioCodec()->SetOutputVolume(0);
-            GetDisplay()->ShowNotification(Lang::Strings::MUTED);
+            ESP_LOGI(TAG, "VOL- long press: stop playback");
+            SdWavPlayer::GetInstance().Stop();
+            GetDisplay()->SetChatMessage("assistant", "");
+            GetDisplay()->ShowNotification("Stopped");
         });
     }
 
@@ -181,9 +202,9 @@ private:
 
 public:
     dayu_star_wifi() :
-        boot_button_(BOOT_BUTTON_GPIO),
-        volume_up_button_(VOLUME_UP_BUTTON_GPIO),
-        volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
+        boot_button_(BOOT_BUTTON_GPIO, false, 2000),
+        volume_up_button_(VOLUME_UP_BUTTON_GPIO, false, 2000),
+        volume_down_button_(VOLUME_DOWN_BUTTON_GPIO, false, 2000) {
         InitializePowerManager();
         InitializePowerSaveTimer();
         InitializeSpi();
@@ -193,6 +214,8 @@ public:
             GetBacklight()->RestoreBrightness();
         }
         InitializeTools();
+        // Mount SD card
+        SdWavPlayer::GetInstance().Mount();
     }
 
     virtual Led* GetLed() override {

@@ -51,4 +51,11 @@
 // A MCP Test: Control a lamp
 //#define LAMP_GPIO GPIO_NUM_18
 
+// TF Card (SPI2_HOST) — LCD uses SPI3_HOST, no conflict
+#define TF_CS_PIN    GPIO_NUM_46
+#define TF_MOSI_PIN  GPIO_NUM_2
+#define TF_MISO_PIN  GPIO_NUM_1
+#define TF_CLK_PIN   GPIO_NUM_3
+#define TF_MOUNT_POINT "/sdcard"
+
 #endif // _BOARD_CONFIG_H_
