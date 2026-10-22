@@ -5,8 +5,6 @@
 #include "mcp_server.h"
 #include <esp_log.h>
 
-#define TAG "LED灯事件"
-
 class LED_Lamp {
 private:
     bool power_ = false;
@@ -15,6 +13,7 @@ private:
 public:
     // 如果修改类名LED_Lamp，下面一行中的LED_Lamp也要同时修改
     explicit LED_Lamp(gpio_num_t gpio_num) : gpio_num_(gpio_num) {
+        static const char* TAG = "LED_Lamp";
         gpio_config_t cfg = {
             .pin_bit_mask = (1ULL << gpio_num_),
             .mode = GPIO_MODE_OUTPUT,
