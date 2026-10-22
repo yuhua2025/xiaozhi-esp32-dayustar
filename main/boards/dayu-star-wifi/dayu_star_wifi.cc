@@ -126,7 +126,7 @@ private:
 
     // 物联网初始化，添加对 AI 可见设备
     void InitializeTools() {
-        static LED_Lamp lamp_G(GPIO_NUM_18);
+        static LED_Lamp lamp_G(GPIO_NUM_47);
     }
 
 public:
