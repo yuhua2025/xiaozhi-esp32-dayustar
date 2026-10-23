@@ -19,6 +19,10 @@
 #include <esp_lcd_panel_ops.h>
 #include <driver/spi_common.h>
 #include <driver/rtc_io.h>
+#include <driver/gpio.h>
+#include <driver/ledc.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <esp_sleep.h>
 #include "assets/lang_config.h"
 
@@ -38,15 +42,63 @@ private:
     PowerManager* power_manager_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
+    TaskHandle_t power_task_ = nullptr;
+    volatile int power_action_ = 0;  // 1=黑屏 2=亮屏 3=关机
+
+    // 显示/背光操作统一放到独立任务执行：PowerSaveTimer 的回调运行在 esp_timer 任务里，
+    // 该任务栈只有约 3.5KB，直接调用 LVGL/LEDC 会爆栈或阻塞，导致背光来不及关闭。
+    void RequestPowerAction(int action) {
+        power_action_ = action;
+        if (power_task_ != nullptr) {
+            xTaskNotifyGive(power_task_);
+        }
+    }
+
+    static void PowerTaskEntry(void* arg) {
+        static_cast<dayu_star_wifi*>(arg)->PowerTask();
+    }
+
+    void PowerTask() {
+        while (true) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            int action = power_action_;
+            power_action_ = 0;
+            if (action == 1) {
+                ESP_LOGI(TAG, "Entering power save (screen off)");
+                GetBacklight()->SetBrightness(0);
+                GetDisplay()->SetPowerSaveMode(true);
+            } else if (action == 2) {
+                GetDisplay()->SetPowerSaveMode(false);
+                GetBacklight()->RestoreBrightness();
+            } else if (action == 3) {
+                ESP_LOGI(TAG, "Shutting down");
+                GetBacklight()->SetBrightness(0);
+                // 等背光渐变到 0
+                vTaskDelay(pdMS_TO_TICKS(500));
+                // KEY-PWR 需要低电平保持 3 秒以上，开关机芯片才会断电
+                ESP_LOGI(TAG, "Drive POWER_HOLD low for 4s to power off");
+                rtc_gpio_set_level(POWER_HOLD_PIN, 0);
+                vTaskDelay(pdMS_TO_TICKS(4000));
+                // 仍未断电（例如 D52 方向未修正或插着 USB），进入 deep sleep 兜底，
+                // 并保持引脚电平，避免休眠后引脚悬空导致背光重新亮起。
+                ESP_LOGW(TAG, "Still powered after 4s, entering deep sleep");
+                rtc_gpio_hold_en(POWER_HOLD_PIN);
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                gpio_set_direction(DISPLAY_BACKLIGHT_PIN, GPIO_MODE_OUTPUT);
+                gpio_set_level(DISPLAY_BACKLIGHT_PIN, 0);
+                gpio_hold_en(DISPLAY_BACKLIGHT_PIN);
+                gpio_deep_sleep_hold_en();
+                esp_deep_sleep_start();
+            }
+        }
+    }
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(CHARGING_DETECT_PIN);
         power_manager_->OnChargingStatusChanged([this](bool is_charging) {
-            if (is_charging) {
-                power_save_timer_->SetEnabled(false);
-            } else {
-                power_save_timer_->SetEnabled(true);
-            }
+            ESP_LOGI(TAG, "Charging status changed: %d", is_charging ? 1 : 0);
+            // 充电时不允许自动关机，拔掉充电线后恢复
+            power_save_timer_->SetEnabled(!is_charging);
         });
     }
 
@@ -56,24 +108,18 @@ private:
         rtc_gpio_set_direction(POWER_HOLD_PIN, RTC_GPIO_MODE_OUTPUT_ONLY);
         rtc_gpio_set_level(POWER_HOLD_PIN, 1);
 
+        xTaskCreate(PowerTaskEntry, "board_power", 4096, this, 5, &power_task_);
+
         // 构造参数：cpu_max_freq=-1 不限制，空闲 60 秒黑屏，300 秒关机
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(true);
-            GetBacklight()->SetBrightness(1);
+            RequestPowerAction(1);
         });
         power_save_timer_->OnExitSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(false);
-            GetBacklight()->RestoreBrightness();
+            RequestPowerAction(2);
         });
         power_save_timer_->OnShutdownRequest([this]() {
-            ESP_LOGI(TAG, "Shutting down");
-            rtc_gpio_set_level(POWER_HOLD_PIN, 0); // 拉低外部电源保持，物理断电
-            rtc_gpio_hold_en(POWER_HOLD_PIN);
-            if (panel_ != nullptr) {
-                esp_lcd_panel_disp_on_off(panel_, false);
-            }
-            esp_deep_sleep_start();
+            RequestPowerAction(3);
         });
         power_save_timer_->SetEnabled(true);
     }
