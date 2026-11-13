@@ -486,6 +486,10 @@ std::string SdWavPlayer::TrackTitle(size_t index) {
 
 // ———————————————————— PlayAudio ————————————————————
 bool SdWavPlayer::PlayAudio(const std::string& path, AudioCodec* codec) {
+    return StartAudio(path, codec, true);
+}
+
+bool SdWavPlayer::StartAudio(const std::string& path, AudioCodec* codec, bool exit_conversation) {
     if (!mounted_) {
         ESP_LOGE(TAG, "SD not mounted");
         return false;
@@ -508,6 +512,7 @@ bool SdWavPlayer::PlayAudio(const std::string& path, AudioCodec* codec) {
 
     current_path_ = path;
     current_codec_ = codec;
+    exit_conversation_ = exit_conversation;
     want_stop_ = false;
     playing_ = true;
 
@@ -521,6 +526,19 @@ bool SdWavPlayer::PlayAudio(const std::string& path, AudioCodec* codec) {
     return true;
 }
 
+bool SdWavPlayer::StartNextTrack(bool exit_conversation) {
+    if (!mounted_ || current_codec_ == nullptr || audio_files_.empty()) {
+        return false;
+    }
+    if (audio_index_ >= audio_files_.size()) {
+        audio_index_ = 0;  // wrap around and keep the playlist playing
+    }
+    std::string path = audio_files_[audio_index_++];
+    ESP_LOGI(TAG, "Auto next: track %d/%d: %s", (int)audio_index_, (int)audio_files_.size(),
+             path.c_str());
+    return StartAudio(path, current_codec_, exit_conversation);
+}
+
 void SdWavPlayer::Stop() {
     want_stop_ = true;
 }
@@ -528,8 +546,15 @@ void SdWavPlayer::Stop() {
 void SdWavPlayer::PlaybackTaskTrampoline(void* arg) {
     SdWavPlayer* self = static_cast<SdWavPlayer*>(arg);
     self->PlaybackTask();
+    bool advance = self->advance_pending_ && !self->want_stop_;
+    self->advance_pending_ = false;
     self->playing_ = false;
     self->task_handle_ = nullptr;
+    if (advance) {
+        // Start the next track only after this task released the playback
+        // state, so the new task does not see the previous one as running.
+        self->StartNextTrack(false);
+    }
     vTaskDelete(nullptr);
 }
 
@@ -537,6 +562,7 @@ void SdWavPlayer::PlaybackTaskTrampoline(void* arg) {
 void SdWavPlayer::PlaybackTask() {
     const std::string path = current_path_;
     AudioCodec* codec = current_codec_;
+    const bool exit_conversation = exit_conversation_;
     ESP_LOGI(TAG, "PlaybackTask start: %s", path.c_str());
 
     // Parse tags here, not in the caller: PlayAudio() is invoked from the
@@ -551,9 +577,11 @@ void SdWavPlayer::PlaybackTask() {
     // echo cancellation, so the assistant must not keep listening/speaking.
     // Give the MCP tool reply time to leave the device first, then close the
     // audio channel. Afterwards only the BOOT key or the wake word can bring
-    // the assistant back.
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Application::GetInstance().ExitConversation();
+    // the assistant back. Auto-advance keeps the session as it is.
+    if (exit_conversation) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        Application::GetInstance().ExitConversation();
+    }
 
     FILE* fp = fopen(path.c_str(), "rb");
     if (!fp) {
@@ -842,6 +870,9 @@ void SdWavPlayer::PlaybackTask() {
     // Flush tail when playback ended naturally
     if (!want_stop_) {
         write_block();
+        // Reached the end of the file without a stop request: play the next
+        // track. The trampoline starts it after this task releases playback.
+        advance_pending_ = true;
     }
 
     ESP_LOGI(TAG, "Playback done (frames=%d, stop=%d, bad=%d, skipped=%d)",

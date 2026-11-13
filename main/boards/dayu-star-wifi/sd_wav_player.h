@@ -54,6 +54,11 @@ private:
 
     static void PlaybackTaskTrampoline(void* arg);
     void PlaybackTask();
+    // Start path in a new playback task; exit_conversation tells the task to
+    // leave the assistant session once playback begins
+    bool StartAudio(const std::string& path, AudioCodec* codec, bool exit_conversation);
+    // Advance to the next playlist entry and play it
+    bool StartNextTrack(bool exit_conversation);
     static std::string ReadId3Title(const std::string& path);
     static int ProbeDuration(const std::string& path);
 
@@ -63,6 +68,9 @@ private:
     volatile bool want_stop_ = false;
     bool paused_for_conversation_ = false;
     volatile bool playing_ = false;
+    // Set when a track reaches its natural end so the next one starts
+    volatile bool advance_pending_ = false;
+    bool exit_conversation_ = true;
     TaskHandle_t task_handle_ = nullptr;
     std::vector<std::string> audio_files_;
     size_t audio_index_ = 0;
