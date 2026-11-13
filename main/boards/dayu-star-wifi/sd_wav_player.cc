@@ -547,6 +547,14 @@ void SdWavPlayer::PlaybackTask() {
     elapsed_sec_ = 0;
     ESP_LOGI(TAG, "Duration: %d s", duration_sec_);
 
+    // Starting local playback leaves the assistant session: the music has no
+    // echo cancellation, so the assistant must not keep listening/speaking.
+    // Give the MCP tool reply time to leave the device first, then close the
+    // audio channel. Afterwards only the BOOT key or the wake word can bring
+    // the assistant back.
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Application::GetInstance().ExitConversation();
+
     FILE* fp = fopen(path.c_str(), "rb");
     if (!fp) {
         ESP_LOGE(TAG, "Cannot open %s (errno=%d)", path.c_str(), errno);

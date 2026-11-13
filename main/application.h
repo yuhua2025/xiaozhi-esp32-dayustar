@@ -110,6 +110,15 @@ public:
 
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
+
+    /**
+     * End the current conversation and return to idle (thread-safe)
+     * Closes the audio channel and drops queued TTS so a local feature such as
+     * SD card playback can run without the assistant talking over it. Wake word
+     * detection stays enabled, so the wake word or a button can start a new
+     * conversation.
+     */
+    void ExitConversation();
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);

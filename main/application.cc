@@ -1359,6 +1359,28 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) { audio_service_.PlaySound(sound); }
 
+void Application::ExitConversation() {
+    // Called from other tasks (e.g. the SD card player), so do the teardown in
+    // the main task where the protocol and state machine are normally driven.
+    Schedule([this]() {
+        if (GetDeviceState() == kDeviceStateNotifying) {
+            StopNotification();
+        }
+        // Drop TTS that the server already queued so it does not play over the
+        // local audio.
+        audio_service_.ResetDecoder();
+        // Closing the audio channel silences the assistant and prevents more
+        // TTS from arriving. The idle state handler re-enables wake word
+        // detection, so the wake word or a button can start a new conversation.
+        if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
+        if (GetDeviceState() != kDeviceStateIdle) {
+            SetDeviceState(kDeviceStateIdle);
+        }
+    });
+}
+
 void Application::ResetProtocol() {
     Schedule([this]() {
         if (GetDeviceState() == kDeviceStateNotifying) {
