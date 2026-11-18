@@ -1,6 +1,6 @@
 # dayu-star-wifi 开发板
 
-基于 ESP32-S3 的小智语音助手开发板固件（ESP-IDF v6.1，固件版本 2.5.2）。
+基于 ESP32-S3 的小智语音助手开发板固件（ESP-IDF v6.1，固件版本 2.6.0，默认语言 zh-CN）。
 
 ## 硬件概览
 
@@ -99,18 +99,28 @@
 
 播放控制已全部交给语音助手，按键只保留音量调节与唤醒。
 
+## 配网
+
+首次上电或没有保存 Wi-Fi 时进入配网模式，屏幕显示热点名与地址：
+
+1. 手机连接热点 `Xiaozhi-9021`；
+2. 浏览器打开 `http://192.168.4.1`，选择 Wi-Fi 并填写密码；
+3. 提交后等待结果。首次关联失败会自动重试，共 3 次、每次间隔 5 秒，页面最长可能需要等待约 40 秒，期间不要重复提交。
+
+重试逻辑位于本地组件 `main/idf_components/78__esp-wifi-connect`（通过 `override_path` 覆盖上游 3.3.3），用于规避路由器首次关联被拒导致的"要点两次才成功"。
+
 ## 编译
 
 ```sh
 source /path/to/esp-idf/export.sh
-python3 scripts/build.py dayu-star-wifi --name dayu-star-wifi
+python3 scripts/build.py dayu-star-wifi --name dayu-star-wifi --language zh-CN
 ```
 
 生成单文件固件（与官方 release 一致）：
 
 ```sh
-python3 scripts/build.py dayu-star-wifi --name dayu-star-wifi --zip
-# 产物：releases/v<version>_dayu-star-wifi.zip（内含 merged-binary.bin）
+python3 scripts/build.py dayu-star-wifi --name dayu-star-wifi --language zh-CN --zip
+# 产物：releases/v2.6.0_dayu-star-wifi.zip（内含 merged-binary.bin）
 ```
 
 ## 烧录
