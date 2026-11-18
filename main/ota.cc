@@ -1,7 +1,9 @@
 #include "ota.h"
-#include "system_info.h"
-#include "settings.h"
 #include "assets/lang_config.h"
+#include "cjson_utils.h"
+#include "protocols/protocol.h"
+#include "settings.h"
+#include "system_info.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -13,6 +15,7 @@
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
+#include <ota_url.h>
 #ifdef SOC_HMAC_SUPPORTED
 #include <esp_hmac.h>
 #endif
@@ -26,17 +29,25 @@
 
 #define TAG "Ota"
 
-
 Ota::Ota() {
 #ifdef ESP_EFUSE_BLOCK_USR_DATA
-    // Read Serial Number from efuse user_data
-    uint8_t serial_number[33] = {0};
+    // USER_DATA may contain board metadata instead of a textual serial number.
+    uint8_t serial_number[32] = {0};
     if (esp_efuse_read_field_blob(ESP_EFUSE_USER_DATA, serial_number, 32 * 8) == ESP_OK) {
-        if (serial_number[0] == 0) {
-            has_serial_number_ = false;
-        } else {
-            serial_number_ = std::string(reinterpret_cast<char*>(serial_number), 32);
+        const auto data_end = serial_number + sizeof(serial_number);
+        const auto text_end = std::find(serial_number, data_end, uint8_t{0});
+        const bool printable = std::all_of(
+            serial_number, text_end, [](uint8_t byte) { return byte >= 0x20 && byte <= 0x7E; });
+        const bool non_blank =
+            std::any_of(serial_number, text_end, [](uint8_t byte) { return byte != ' '; });
+        const bool zero_padding =
+            std::all_of(text_end, data_end, [](uint8_t byte) { return byte == 0; });
+        if (printable && non_blank && zero_padding) {
+            serial_number_.assign(reinterpret_cast<const char*>(serial_number),
+                                  text_end - serial_number);
             has_serial_number_ = true;
+        } else if (std::any_of(serial_number, data_end, [](uint8_t byte) { return byte != 0; })) {
+            ESP_LOGW(TAG, "Ignoring non-textual or blank eFuse serial number; using activation v1");
         }
     }
 #endif
@@ -48,6 +59,10 @@ Ota::~Ota() {
 std::string Ota::GetCheckVersionUrl() {
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
+    if (!wifi_config::IsValidOtaUrl(url)) {
+        ESP_LOGW(TAG, "Ignoring invalid saved OTA URL; using the default");
+        url.clear();
+    }
     if (url.empty()) {
         url = CONFIG_OTA_URL;
     }
@@ -73,9 +88,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
     return http;
 }
 
-/* 
- * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
- */
+// Device-facing OTA contract: docs/ota.md.
 NetworkResult<> Ota::CheckVersion() {
     auto& board = Board::GetInstance();
     auto app_desc = esp_app_get_description();
@@ -85,7 +98,7 @@ NetworkResult<> Ota::CheckVersion() {
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
     std::string url = GetCheckVersionUrl();
-    if (url.length() < 10) {
+    if (url.empty() || !wifi_config::IsValidOtaUrl(url)) {
         ESP_LOGE(TAG, "Check version URL is not properly set");
         return std::unexpected(NetworkError::InvalidArgument());
     }
@@ -93,6 +106,24 @@ NetworkResult<> Ota::CheckVersion() {
     auto http = SetupHttp();
 
     std::string data = board.GetSystemInfoJson();
+    const auto root_start = data.find_first_not_of(" \r\n\t");
+    const auto root_end = data.find_last_not_of(" \r\n\t");
+    if (root_start != std::string::npos && data[root_start] == '{' && data[root_end] == '}') {
+        CJsonUniquePtr protocol(cJSON_CreateObject());
+        if (protocol == nullptr) {
+            return std::unexpected(NetworkError::ProtocolError());
+        }
+        Protocol::AddClientCapabilities(protocol.get(), false);
+        CJsonStringUniquePtr encoded(cJSON_PrintUnformatted(protocol.get()));
+        if (encoded == nullptr) {
+            return std::unexpected(NetworkError::ProtocolError());
+        }
+        // The board returns a root object. Append the serialized property without building
+        // a second tree of device/partition information on memory-constrained targets.
+        const auto first_property = data.find_first_not_of(" \r\n\t", root_start + 1);
+        data.insert(root_end, std::string(first_property == root_end ? "" : ",") +
+                                  "\"protocol\":" + encoded.get());
+    }
     std::string method = data.length() > 0 ? "POST" : "GET";
     http->SetContent(std::move(data));
 
@@ -500,6 +531,10 @@ esp_err_t Ota::Activate() {
     }
 
     std::string url = GetCheckVersionUrl();
+    if (url.empty() || !wifi_config::IsValidOtaUrl(url)) {
+        ESP_LOGE(TAG, "Activation URL is not properly set");
+        return ESP_ERR_INVALID_ARG;
+    }
     if (url.back() != '/') {
         url += "/activate";
     } else {

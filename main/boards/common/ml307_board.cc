@@ -87,7 +87,7 @@ void Ml307Board::NetworkTask() {
     }
 
     ESP_LOGI(TAG, "Modem detected successfully");
-    modem_->GetAtUart()->SetDebug(true);
+    // modem_->GetAtUart()->SetDebug(true);
 
     // Set up network state change callback
     // Note: Don't call GetCarrierName() here as it sends AT command and will block ReceiveTask
@@ -264,6 +264,8 @@ std::string Ml307Board::GetDeviceStatusJson() {
         cJSON_AddStringToObject(network, "signal", "strong");
     }
     cJSON_AddItemToObject(root, "network", network);
+
+    AddSystemStatus(root);
 
     auto json_str = cJSON_PrintUnformatted(root);
     std::string json(json_str);
