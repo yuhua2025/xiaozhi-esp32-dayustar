@@ -1,0 +1,19 @@
+dependencies:
+  espressif/cjson:
+    matches:
+    - if: idf_version >=6.0
+    version: ^1.7.19
+  idf: '>=5.3'
+description: ESP32 WiFi Configuration
+files:
+  exclude:
+  - .git
+  - dist
+  - tests/**
+license: MIT
+repository: git://github.com/78/esp-wifi-connect.git
+repository_info:
+  commit_sha: 77095063d77e7705f68e95005c43ed73582233ce
+  path: .
+url: https://github.com/78/esp-wifi-connect
+version: 3.3.3
